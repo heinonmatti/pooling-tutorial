@@ -1,0 +1,186 @@
+---
+title: "R Notebook"
+output:
+  html_document: default
+  html_notebook: default
+---
+
+This tutorial is to show how pooling affects estimation. 
+
+First, I got the estimates:
+
+```{r}
+.libPaths("//ATKK/home/h/hema/Documents/R libs")
+
+.libPaths()
+library(pacman)
+p_load(tidyverse, rethinking)
+
+# p_delete(rethinking)
+p_load_gh("rmcelreath/rethinking")
+
+library("rethinking")
+
+library(knitr)
+knitr::opts_chunk$set(warning = FALSE, 
+               message = FALSE, 
+               verbose = FALSE, 
+               cache = TRUE)
+```
+```
+
+
+
+Code below creates pre- and post-intervention wear times for 60 classrooms of different size. Naturally the smaller classrooms end up with more variation. 
+
+```{r}
+mean_val <- 4500/60 # 75; approximate values from the data, converted to hours
+sd_val <- 1600/60 # 26.6667
+mean_val
+sd_val
+
+nclassrooms <- 60
+
+n_students <- rep(c(6, 15, 25, 40), each = 15) %>% as.integer()
+n_students
+
+# for a more noticeable effect, try more dramatic numbers:
+# n_students <- rep(c(1, 1, 1e5, 1e5), each = 15) %>% as.integer()
+
+# Create an empty vector for the classroom means
+mean_classroom_pre <- rep(NA, 60)
+mean_classroom_post <- rep(NA, 60)
+
+set.seed(1)
+for (i in 1:nclassrooms) { # Loop around each classroom size
+simd_pre <- rnorm(n_students[i], mean = mean_val, sd = sd_val) # Create random values according to classroom size
+simd_post <- rnorm(n_students[i], mean = simd_pre + sd_val * 0.3, sd = sd_val) # add a d=0.3 change
+mean_classroom_pre[i] <- mean(simd_pre) # Calculate mean of the random numbers and store it to a vector
+mean_classroom_post[i] <- mean(simd_post)
+}
+
+# Here are the simulated classroom means:
+mean_classroom_pre
+# Here are the simulated changes in classroom means:
+mean_classroom_post
+
+# Collect everything to a data frame
+dsim <- data.frame(classroom = 1:nclassrooms, n_students = n_students, true_mean_pre = mean_classroom_pre, true_mean_post = mean_classroom_post)
+dsim
+
+```
+
+We calculated the change so that if we had an infinite sample, we'd observe the true change of 8 hours (0.3 * 26.6667).
+
+**Data analysis begins!** 
+
+Estimates without pooling:
+
+```{r}
+dsim$meanchange_nopool <- dsim$true_mean_post - dsim$true_mean_pre
+dsim$meanchange_nopool
+dsim$true_mean_pre
+```
+
+Here are the mean changes for each classroom size; you can see how smaller classrooms have more variability, which means more uncertainty and wider confidence intervals.
+
+```{r}
+dsim %>% 
+  dplyr::group_by(n_students) %>% 
+  dplyr::mutate(classroom_mean = mean(meanchange_nopool)) %>% 
+  dplyr::summarise(mean_change = mean(meanchange_nopool),
+                   sd_change = sd(meanchange_nopool),
+                   n = n()) %>% 
+  dplyr::mutate(std_err = sd_change / sqrt(n),
+                lower_ci = mean_change - qt(1 - (0.05/2), n - 1) * std_err,
+                upper_ci = mean_change + qt(1 - (0.05/2), n - 1) * std_err) %>% 
+  dplyr::select(n_students, mean_change, lower_ci, upper_ci)
+```
+
+Let's "tidy" the dataset, i.e. transform it to long form, where each classroom has one row with pre-intervention value and one row with post-intervention value. The variable "post" gets value 1 for post-intervention rows and zero otherwise.
+
+```{r}
+dsim_tidy <- dsim %>% 
+  tidyr::gather(time, value, true_mean_pre, true_mean_post) %>% 
+  dplyr::mutate(post = ifelse(time == "true_mean_pre", 0, 1),
+                classroomf = as.factor(classroom))
+
+dsim_tidy
+
+```
+
+Here's a simple linear regression on the form:
+
+$$begin{eqnarray} 
+\begin{aligned} 
+value &\sim Normal(\mu_i, \sigma)  \\
+\end{aligned}
+\end{eqnarray}$$
+
+
+```{r}
+
+ols_mod <- lm(value ~ post, data = dsim_tidy)
+summary(ols_mod)
+```
+
+The value of "post" is now 8.54, slightly exaggerated from the real value. Let's add classroom as a dummy variable:
+
+```{r}
+
+ols_mod <- lm(value ~ post + classroomf, data = dsim_tidy)
+broom::tidy(ols_mod) %>% filter(term == "post")
+
+```
+
+When we added classroom, the estimate remained the same but it's standard error came down.
+
+
+$$begin{eqnarray} 
+\begin{aligned} 
+value &\sim Normal(\mu_i, \sigma)  \\
+\mu_{ind} &= \alpha + \alpha_{ind} + \beta_{t} \times Time + \beta_{i} \times Intervention +  \beta_{it} \times Intervention \times Time  \\
+\alpha &\sim Normal(0, 10)   \\
+\alpha_{i} &\sim Normal(0, 10)   \\
+\beta_{t} &\sim Normal(0, 2)  \\
+\beta_{i} &\sim Normal(0, 2)  \\
+\beta_{it} &\sim Normal(0, 2)  \\
+\alpha_{sigma} &\sim HalfCauchy(0, 5)  \\
+\end{aligned}
+\end{eqnarray}$$
+
+```{r}
+mpartpool <- rethinking::map2stan(
+  alist(
+    value ~ dnorm(mu, sigma),
+    mu <- a + bp * post,
+    a ~ dnorm(0, 100),
+    bp ~ dnorm(0, 100),
+    sigma ~ dcauchy(0, 100)),
+    data = dsim_tidy,
+    iter = 4000,
+    chains = 2,
+    warmup = 1000
+)
+
+precis(mpartpool)
+precis(mpartpool) %>% plot
+```
+
+```{r}
+mpartpool <- rethinking::map2stan(
+  alist(
+    value ~ dnorm(mu, sigma),
+    mu <- a[classroom] + bp * post,
+    a[classroom] ~ dnorm(0, 100),
+    bp ~ dnorm(0, 100),
+    sigma ~ dcauchy(0, 100)),
+    data = dsim_tidy,
+    iter = 4000,
+    chains = 2,
+    warmup = 1000
+)
+
+precis(mpartpool)
+precis(mpartpool) %>% plot
+```

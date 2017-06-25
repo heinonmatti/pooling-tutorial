@@ -1,0 +1,325 @@
+---
+title: "R Notebook"
+output:
+  html_document: default
+  html_notebook: default
+---
+
+This tutorial is to show how pooling affects estimation. 
+
+First, I got the estimates:
+
+```{r}
+.libPaths()
+library(pacman)
+p_load(tidyverse, rethinking)
+
+# p_delete(rethinking)
+p_load_gh("rmcelreath/rethinking")
+
+
+library("rethinking")
+
+library(knitr)
+knitr::opts_chunk$set(warning = FALSE, 
+               message = FALSE, 
+               verbose = FALSE, 
+               cache = TRUE)
+
+```
+
+
+Code below creates pre- and post-intervention wear times for 60 classes of different size. Naturally the smaller classes end up with more variation. 
+
+```{r}
+mean_val <- 4500/60 # 75; approximate values from the data, converted to hours
+sd_val <- 1600/60 # 26.6667
+stdeffect <- 0.3
+n_students <- rep(c(6, 15, 25, 40), each = 15) %>% as.integer()
+
+# Create an empty vector for the class means
+mean_class_pre <- rep(NA, 60)
+
+set.seed(72)
+for (i in 1:length(n_students)) { # Loop around each class size
+simclass_pre <- rnorm(n_students[i], mean = mean_val, sd = sd_val) # Create an imaginary class of size 6/15/25/40
+mean_class_pre[i] <- mean(simclass_pre) # Save mean of the class to get a vector of 60 class means.
+}
+
+set.seed(72)
+intervention <- sample(size = 60, x = 0:1, replace = TRUE) %>% 
+  rep(., times = n_students) # vector of 1 or 0 for each class, indicating whether its students underwent intervention
+classmean_pre <- rep(mean_class_pre, times = n_students) # Vector of class means
+class_size <- rep(c(6, 15, 25, 40), each = 15, times = n_students) # Vector of class size, for clarity
+
+set.seed(72)
+d <- data.frame(id = 1:1290, class_size, classmean_pre, intervention) %>% # gather all in a data frame
+  rowwise %>% # work through every row
+  mutate(indmean_pre  = rnorm(n = 1, mean = classmean_pre, sd = sd_val), # create an individual mean based on the class mean
+         indmean_post = ifelse(intervention == 1, # if an intervention participant
+                               rnorm(n = 1, mean = indmean_pre + sd_val * stdeffect, sd = sd_val), # add about 0.3 sd to baseline
+                               rnorm(n = 1, mean = indmean_pre + sd_val * 0.25 * stdeffect, sd = sd_val))) # if control, post-measure is a 1/4th of the intervention group increase.
+
+means <- d %>% dplyr::group_by(intervention) %>% 
+  dplyr::summarise(diff = mean(indmean_post - indmean_pre))
+
+d %>% gather(time, value, indmean_pre:indmean_post) %>% 
+  ggplot(aes(y = value, x = time, color = intervention)) +
+  geom_line() +
+  theme_classic() +
+  labs(y = "") +
+  theme(legend.position = "bottom")
+
+d %>%
+  dplyr::mutate(intervention = as.factor(intervention)) %>% 
+  ggplot(aes(y = indmean_post - indmean_pre, x = id, color = intervention)) +
+  geom_point() +
+  theme_classic() +
+  labs(y = "", title = "Post-pre differences for individuals") +
+  theme(legend.position = "bottom") +
+  geom_hline(yintercept = means$diff[2], color = "red") + # line for intervention mean
+  geom_hline(yintercept = means$diff[1], color = "blue")  # line for control mean
+
+
+  geom_hline(aes(ylintercept = mean(d$indmean_post - d$indmean_pre)[intervention == 1]))
+
+
+```
+
+This code produces a plot that shows variability between mean post - pre values of the two groups with different seeds:
+
+```{r plot_w_different_seeds}
+mean_val <- 4500/60 # 75; approximate values from the data, converted to hours
+sd_val <- 1600/60 # 26.6667
+stdeffect <- 0.3
+n_students <- rep(c(6, 15, 25, 40), each = 15) %>% as.integer()
+
+n_simulations <- 100
+dsummary <- data.frame(intervention = rep(NA, 100), control = rep(NA, 100))
+
+# Create an empty vector for the class means
+mean_class_pre <- rep(NA, 60)
+
+for (n_simulations in 1:n_simulations) {
+set.seed(n_simulations)
+for (i in 1:length(n_students)) { # Loop around each class size
+simclass_pre <- rnorm(n_students[i], mean = mean_val, sd = sd_val) # Create an imaginary class of size 6/15/25/40
+mean_class_pre[i] <- mean(simclass_pre) # Save mean of the class to get a vector of 60 class means.
+}
+
+set.seed(n_simulations)
+intervention <- sample(size = 60, x = 0:1, replace = TRUE) %>% 
+  rep(., times = n_students) # vector of 1 or 0 for each class, indicating whether its students underwent intervention
+classmean_pre <- rep(mean_class_pre, times = n_students) # Vector of class means
+class_size <- rep(c(6, 15, 25, 40), each = 15, times = n_students) # Vector of class size, for clarity
+
+set.seed(n_simulations)
+d <- data.frame(id = 1:1290, class_size, classmean_pre, intervention) %>% # gather all in a data frame
+  rowwise %>% # work through every row
+  mutate(indmean_pre  = rnorm(n = 1, mean = classmean_pre, sd = sd_val), # create an individual mean based on the class mean
+         indmean_post = ifelse(intervention == 1, # if an intervention participant
+                               rnorm(n = 1, mean = indmean_pre + sd_val * stdeffect, sd = sd_val), # add about 0.3 sd to baseline
+                               rnorm(n = 1, mean = indmean_pre, sd = sd_val))) # if control, post-measure is a random variable
+
+dsum <- d %>% dplyr::group_by(intervention) %>% 
+  dplyr::summarise(diff = mean(indmean_post - indmean_pre))
+
+dsummary[n_simulations, 1] <- dsum[2,2]
+dsummary[n_simulations, 2] <- dsum[1,2]
+}
+
+dsummary$seed <- 1:100
+dsummary  %>% gather(group, value, intervention:control) %>% 
+  ggplot(aes(y = value, x = seed, color = group)) +
+  geom_point() +
+  theme_classic() +
+  labs(y = "") +
+  theme(legend.position = "bottom")
+
+# Check which seed produces the minimum mean post-pre discordance from the values used (0 diff for ctrl, e.g. 0.3*27 for intervention)
+dsummary$diff_i <- dsummary$intervention - (stdeffect*sd_val)
+dsummary$totaldiff <- abs(dsummary$diff_i) + abs(dsummary$control) 
+which.min(dsummary$totaldiff)
+
+```
+
+We calculated the change so that if we had an infinite sample, we'd observe the true change of 8 hours (0.3 * 26.6667).
+
+**Data analysis begins!** 
+
+Estimates without pooling:
+
+```{r}
+dsim$meanchange_real <- dsim$true_mean_post - dsim$true_mean_pre
+dsim$meanchange_real
+dsim$true_mean_pre
+```
+
+Here are the mean changes for each class size; you can see how smaller classes have more variability, which means more uncertainty and wider confidence intervals.
+
+```{r}
+dsim %>% 
+  dplyr::group_by(n_students) %>% 
+  dplyr::mutate(class_mean = mean(meanchange_real)) %>% 
+  dplyr::summarise(mean_change = mean(meanchange_real),
+                   sd_change = sd(meanchange_real),
+                   n = n()) %>% 
+  dplyr::mutate(std_err = sd_change / sqrt(n),
+                lower_ci = mean_change - qt(1 - (0.05/2), n - 1) * std_err,
+                upper_ci = mean_change + qt(1 - (0.05/2), n - 1) * std_err) %>% 
+  dplyr::select(n_students, mean_change, lower_ci, upper_ci)
+```
+
+Let's "tidy" the dataset, i.e. transform it to long form, where each class has one row with pre-intervention value and one row with post-intervention value. The variable "post" gets value 1 for post-intervention rows and zero otherwise.
+
+```{r}
+dsim_tidy <- dsim %>% 
+  tidyr::gather(time, value, true_mean_pre, true_mean_post) %>% 
+  dplyr::mutate(post = ifelse(time == "true_mean_pre", 0, 1),
+                classf = as.factor(classroom))
+
+dsim_tidy
+
+```
+
+Here's a simple linear regression on the form:
+
+$$begin{eqnarray} 
+\begin{aligned} 
+value &\sim Normal(\mu_i, \sigma)  \\
+\end{aligned}
+\end{eqnarray}$$
+
+
+```{r}
+
+ols_mod <- lm(value ~ post, data = dsim_tidy)
+summary(ols_mod)
+```
+
+The value of "post" is now 8.54, slightly exaggerated from the real value. Let's add class as a dummy variable:
+
+```{r}
+
+ols_mod <- lm(value ~ post + classf, data = dsim_tidy)
+broom::tidy(ols_mod) %>% filter(term == "post")
+
+```
+
+When we added class, the estimate remained the same but it's standard error came down. MCMC gives nearly the same solution
+
+
+$$begin{eqnarray} 
+\begin{aligned} 
+value &\sim Normal(\mu_i, \sigma)  \\
+\mu_{ind} &= \alpha + \alpha_{ind} + \beta_{t} \times Time + \beta_{i} \times Intervention +  \beta_{it} \times Intervention \times Time  \\
+\alpha &\sim Normal(0, 10)   \\
+\alpha_{i} &\sim Normal(0, 10)   \\
+\beta_{t} &\sim Normal(0, 2)  \\
+\beta_{i} &\sim Normal(0, 2)  \\
+\beta_{it} &\sim Normal(0, 2)  \\
+\alpha_{sigma} &\sim HalfCauchy(0, 5)  \\
+\end{aligned}
+\end{eqnarray}$$
+
+```{r}
+
+mnopool <- rethinking::map2stan(
+  alist(
+    value ~ dnorm(mu, sigma),
+    mu <- a + bp * post,
+    a ~ dnorm(0, 100),
+    bp ~ dnorm(0, 100),
+    sigma ~ dcauchy(0, 100)),
+    data = dsim_tidy,
+    iter = 4000,
+    chains = 2,
+    warmup = 1000
+)
+
+precis(mnopool, prob = 0.95)
+
+
+```
+
+```{r}
+
+mpartpool <- rethinking::map2stan(
+  alist(
+    value ~ dnorm(mu, sigma),
+    mu <- a1 + a[classroom] + bp * post,
+    a1 ~ dnorm(0, 100),
+    a[classroom] ~ dnorm(0, 100),
+    bp ~ dnorm(0, 100),
+    sigma ~ dcauchy(0, 100)),
+    data = dsim_tidy,
+    iter = 4000,
+    chains = 2,
+    warmup = 1000
+)
+
+precis(mpartpool, depth = 2, prob = 0.95)
+
+```
+
+
+
+
+```{r}
+
+mpartpool2 <- rethinking::map2stan(
+  alist(
+    value ~ dnorm(mu, sigma),
+    mu <- a + bp[classroom] * post,
+    a ~ dnorm(0, 100),
+    bp[classroom] ~ dnorm(0, 100),
+    sigma ~ dcauchy(0, 100)),
+    data = dsim_tidy,
+    iter = 10000,
+    chains = 2,
+    warmup = 2000
+)
+
+precis(mpartpool2, depth = 2, prob = 0.95)
+
+```
+
+```{r}
+dsim$estimated_mean_pre <- as.numeric(coef(mpartpool)[1:60])
+dsim$estimated_mean_post <- as.numeric(coef(mpartpool)[1:60]) + coef(mpartpool)[61]
+
+dsim$real_change <- dsim$true_mean_post - dsim$true_mean_pre
+dsim$est_change <- dsim$estimated_mean_post - dsim$estimated_mean_pre
+dsim$est_change2 <- as.numeric(coef(mpartpool2)[2:61])
+
+est_error1 <- abs(dsim$real_change - dsim$est_change)
+est_error2 <- abs(dsim$real_change - dsim$est_change2)
+mean(est_error1)
+mean(est_error2)
+
+plot(1:60, est_error1, xlab="classroom", ylab = "absolute error", col = rangi2, pch = 16, main = paste0("d = ", stdeffect, ", Mean real change = ", round(mean(dsim$real_change), 2)))
+points(1:60, est_error2)
+abline(v = c(seq(from = 15.5, to = 60, by = 15)))
+lines(x = c(0, 15),
+       y = c(mean(est_error1[1:15]), mean(est_error1[1:15])), col = "Blue")
+lines(x = c(16, 30),
+       y = c(mean(est_error1[16:30]), mean(est_error1[16:30])), col = "Blue")
+lines(x = c(31, 45),
+       y = c(mean(est_error1[31:45]), mean(est_error1[31:45])), col = "Blue")
+lines(x = c(46, 60),
+       y = c(mean(est_error1[46:60]), mean(est_error1[46:60])), col = "Blue")
+lines(x = c(0, 15),
+       y = c(mean(est_error2[1:15]), mean(est_error2[1:15])), col = "Black")
+lines(x = c(16, 30),
+       y = c(mean(est_error2[16:30]), mean(est_error2[16:30])), col = "Black")
+lines(x = c(31, 45),
+       y = c(mean(est_error2[31:45]), mean(est_error2[31:45])), col = "Black")
+lines(x = c(46, 60),
+       y = c(mean(est_error2[46:60]), mean(est_error2[46:60])), col = "Black")
+
+est_error1_save 
+est_error1
+est_error2_save
+est_error2
+
+```
